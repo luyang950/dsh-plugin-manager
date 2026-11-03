@@ -49,6 +49,8 @@ DeepSeek Harness（DSH）第三方插件的管理工具。在 DSH 插件页加�
 - 卸载期间插件详情页会暂时消失，右下角的进度面板（`shell.overlay`）不受影响。
 
 进度面板显示两个步骤（卸载、安装）、pnpm 输出和失败原因。失败原因会带上关键的那行报错，比如 `[ENOENT] …`、`ERR_PNPM_…`。失败后：
+成功的提示 8 秒后自动关闭，底部的细线是倒计时。鼠标移上去或展开了输出时暂停，移开后重新计时；需要重启 DSH 的提示不会自动关闭。打开页面时，2 分钟前就已完成、但没有关掉的提示会直接收起，不再弹出。失败和被中断的提示一直留着，等你处理：
+
 - **卸载之后安装失败**：插件处于未安装状态。面板会明确提示，并提供**重试安装**（只重做安装）。如果是切换版本失败，还提供**恢复原来的版本**。
 - **卸载本身失败**：插件保持原样，**重试**会重做整个任务。
 - **DSH 在任务中途重启**：任务标为「被中断」，可以重试。
@@ -167,6 +169,8 @@ Jobs run in the host half and are written to `.dsh-plugin-manager/` in the profi
 - the plugin's page disappears while it is uninstalled, but the bottom-right panel (`shell.overlay`) stays.
 
 The panel shows both steps (uninstall, install), the pnpm output, and the reason for a failure with the line that matters (`[ENOENT] …`, `ERR_PNPM_…`).
+
+A panel for a job that went well closes itself after 8 seconds; the thin line at its bottom counts down. Hovering it or opening its output pauses the countdown, which starts over when you move away; a panel that asks for a DSH restart stays. Finished jobs nobody closed that ended more than 2 minutes before the page opened are not shown again. Failed and interrupted jobs stay until you deal with them:
 
 - **Install fails after the uninstall**: the plugin is left uninstalled. The panel says so and offers *Retry install* (install only), plus *Restore the previous version* for a failed switch.
 - **The uninstall itself fails**: nothing changed; *Retry* runs the whole job again.

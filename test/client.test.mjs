@@ -455,3 +455,42 @@ test('flaky networks: the check step, an unreachable host, automatic install ret
   const retried = text(plugin.JobPanel({ job: { id: 'v', type: 'update', name: 'r', spec: 's', phase: 'done', removed: true, preflight: true, installTries: 2, enabled: true }, hub }))
   assert.match(retried, /已自动重试 1 次/)
 })
+
+test('a finished job closes itself; failures, restarts, hover and open output keep it', () => {
+  const { plugin } = loadBundle()
+  const done = { id: 'd', type: 'update', name: 'r', spec: 's', phase: 'done', removed: true, enabled: true }
+  assert.equal(plugin.autoCloseDelay(done), 8000)
+  assert.equal(plugin.autoCloseDelay(done, { hovered: true }), null, 'paused under the pointer')
+  assert.equal(plugin.autoCloseDelay(done, { showLog: true }), null, 'paused while reading the output')
+  assert.equal(plugin.autoCloseDelay({ ...done, application: 'restart-required' }), null, 'a restart is still owed')
+  assert.equal(plugin.autoCloseDelay({ ...done, phase: 'failed' }), null)
+  assert.equal(plugin.autoCloseDelay({ ...done, phase: 'interrupted' }), null)
+  assert.equal(plugin.autoCloseDelay({ ...done, phase: 'installing' }), null)
+  const panel = plugin.JobPanel({ job: done, hub: { dismiss() {}, retry() {} } })
+  const countdown = panel.children.flat(Infinity).find((child) => child && child.props && /dpmCountdown/.test(child.props.className || ''))
+  assert.ok(countdown, 'a finished panel shows its countdown')
+  assert.equal(countdown.props.style.animationDuration, '8000ms')
+  const failed = plugin.JobPanel({ job: { ...done, phase: 'failed', failure: { code: 'x' } }, hub: { dismiss() {}, retry() {} } })
+  assert.equal(failed.children.flat(Infinity).some((child) => child && child.props && /dpmCountdown/.test(child.props.className || '')), false)
+})
+
+test('on page load, jobs that finished long ago are closed instead of shown again', async () => {
+  const { plugin } = loadBundle()
+  const host = fakeHost()
+  const at = 10 * 60 * 1000
+  host.deps.now = () => at
+  host.state.jobs = [
+    { id: 'old', type: 'update', name: 'a', phase: 'done', updatedAt: at - 5 * 60 * 1000 },
+    { id: 'fresh', type: 'update', name: 'b', phase: 'done', updatedAt: at - 10 * 1000 },
+    { id: 'oldfail', type: 'update', name: 'c', phase: 'failed', updatedAt: at - 5 * 60 * 1000 },
+  ]
+  assert.deepEqual(JSON.parse(JSON.stringify(plugin.staleDone(host.state.jobs, at).map((job) => job.id))), ['old'])
+  const hub = plugin.createHub(host.deps)
+  await hub.start()
+  await new Promise((resolve) => setImmediate(resolve))
+  const byId = Object.fromEntries(plugin.shared.jobs.map((job) => [job.id, job]))
+  assert.equal(byId.old.dismissed, true)
+  assert.notEqual(byId.fresh.dismissed, true, 'a self-update that just finished is still shown')
+  assert.notEqual(byId.oldfail.dismissed, true, 'a failure waits for the person')
+  assert.deepEqual(JSON.parse(JSON.stringify(host.calls.filter(Array.isArray))), [['/jobs/dismiss', { id: 'old' }]])
+})
