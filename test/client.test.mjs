@@ -435,3 +435,23 @@ test('the overlay shows active jobs first and hides dismissed ones', () => {
   assert.equal(plugin.JobsOverlay({ hub }), null)
   assert.equal(plugin.JobsOverlay({}), null)
 })
+
+test('flaky networks: the check step, an unreachable host, automatic install retries', () => {
+  const { plugin } = loadBundle()
+  const hub = { retry() {}, dismiss() {} }
+  assert.equal(plugin.stepState({ type: 'update', phase: 'checking', preflight: true }, 'check'), 'running')
+  assert.equal(plugin.stepState({ type: 'update', phase: 'removing', preflight: true }, 'check'), 'done')
+  assert.equal(plugin.stepState({ type: 'update', phase: 'installing' }, 'check'), null, 'no check for non-git sources')
+  const unreachable = { id: 'u', type: 'update', name: 'r', spec: 'github:o/r', phase: 'failed', failedStage: 'preflight', preflight: true, checkTries: 3, removed: false, failure: { code: 'unreachable', url: 'https://github.com/o/r.git', attempts: 3, diagnostic: 'LibreSSL SSL_connect: SSL_ERROR_SYSCALL' } }
+  assert.equal(plugin.stepState(unreachable, 'check'), 'failed')
+  assert.equal(plugin.stepState(unreachable, 'remove'), 'skipped')
+  assert.equal(plugin.stepState(unreachable, 'install'), 'skipped')
+  const panel = text(plugin.JobPanel({ job: unreachable, hub }))
+  assert.match(panel, /检查能否访问安装来源（第 3 次）/)
+  assert.match(panel, /连不上 https:\/\/github\.com\/o\/r\.git（已试 3 次）/)
+  assert.match(panel, /还没有卸载，插件保持原样/)
+  assert.match(panel, /重试/)
+  assert.doesNotMatch(panel, /重试安装/)
+  const retried = text(plugin.JobPanel({ job: { id: 'v', type: 'update', name: 'r', spec: 's', phase: 'done', removed: true, preflight: true, installTries: 2, enabled: true }, hub }))
+  assert.match(retried, /已自动重试 1 次/)
+})

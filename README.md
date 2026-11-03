@@ -53,6 +53,13 @@ DeepSeek Harness（DSH）第三方插件的管理工具。在 DSH 插件页加�
 - **卸载本身失败**：插件保持原样，**重试**会重做整个任务。
 - **DSH 在任务中途重启**：任务标为「被中断」，可以重试。
 
+### 网络不稳定时
+
+访问 GitHub 的连接偶尔会在 TLS 握手时被断开（日志里是 `SSL_ERROR_SYSCALL`）。DSH 安装前只检查一次，失败就直接拦下。为了不让插件「卸载了却装不回来」：
+
+- **卸载前先预检**：GitHub / git 来源的任务会先用 `git ls-remote` 确认远端能连上，网络类失败最多试 3 次（间隔 1.5 秒、4 秒）。仍连不上就结束任务，**不卸载**，插件保持原样，面板显示「连不上 …（已试 3 次）」，网络恢复后点重试即可。认证失败、仓库不存在这类问题不在预检里拦，照常交给 DSH 报错。
+- **安装失败自动重试**：DSH 报告连不上来源主机（`failedAt: 'spec-host'`，网络或超时）时，任务自动再装，最多 3 次。DSH 每次失败都会恢复 profile 文件，所以重试是安全的。面板会写明「已自动重试 N 次」。
+
 ### 更新自己
 
 dsh-plugin-manager 也可以在「管理」页或自己的详情页上更新自己。卸载会把正在运行的插件实例停掉，但后台任务继续执行，用的是事先拿到的插件管理服务引用，直到重新安装完成。重装后的新实例从任务文件里读回结果，页面会短暂刷新一下。
@@ -164,6 +171,13 @@ The panel shows both steps (uninstall, install), the pnpm output, and the reason
 - **Install fails after the uninstall**: the plugin is left uninstalled. The panel says so and offers *Retry install* (install only), plus *Restore the previous version* for a failed switch.
 - **The uninstall itself fails**: nothing changed; *Retry* runs the whole job again.
 - **DSH restarts mid-job**: the job is marked interrupted and can be retried.
+
+### On a flaky network
+
+Connections to GitHub sometimes drop during the TLS handshake (`SSL_ERROR_SYSCALL` in the log). DSH checks once before an install and gives up on the first failure. So that a plugin is never uninstalled and then left out:
+
+- **Preflight before the uninstall**: a job for a GitHub / git source first runs `git ls-remote`, retrying network failures up to 3 times (1.5 s, then 4 s apart). If the host still cannot be reached the job stops **without uninstalling anything**, and the panel says *Could not reach … (tried 3 times)*; retry once the network is back. Authentication failures and missing repositories are not stopped here; DSH reports them as usual.
+- **Automatic install retries**: when DSH reports that the spec's host could not be reached (`failedAt: 'spec-host'`, network or timeout), the job installs again, up to 3 times. DSH restores the profile files after each failure, so a retry is safe. The panel says how many retries it took.
 
 ### Updating itself
 

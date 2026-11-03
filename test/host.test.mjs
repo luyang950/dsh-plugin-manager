@@ -3,13 +3,14 @@
 // plugin manager, and the HTTP API. Nothing touches the network or a real DSH.
 
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { mkdir, readdir, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import test from 'node:test'
 
 import { API_PREFIX, apply, inject, name } from '../index.mjs'
 import { createApi } from '../lib/api.mjs'
-import { listRemoteRefs, lockedCommit, lockedEntry, parseRefs, pickRemoteCommit, remoteStatus, resolveRef } from '../lib/git.mjs'
+import { gitLsRemote, isNetworkError, listRemoteRefs, lockedCommit, lockedEntry, parseRefs, pickRemoteCommit, remoteStatus, resolveRef } from '../lib/git.mjs'
 import { cleanLogs, exportManifest, importPlan, listLogs, pluginRows, problems, readLog } from '../lib/inventory.mjs'
 import { createJobs, failureOf, runnerState } from '../lib/jobs.mjs'
 import { classifySource, gitRemote, specWithRef, validRef } from '../lib/sources.mjs'
@@ -263,7 +264,7 @@ async function queue(plugins, options = {}) {
   const profile = await fakeProfile(plugins, options)
   const store = createStore(profile.dir)
   const lsRemote = options.lsRemote ?? (async () => LS_REMOTE)
-  const jobs = createJobs({ profileDir: profile.dir, store, pluginManager: () => profile.pluginManager, lsRemote })
+  const jobs = createJobs({ profileDir: profile.dir, store, pluginManager: () => profile.pluginManager, lsRemote, sleep: async () => {}, retryDelays: [0, 0] })
   const settled = (id) => until(async () => {
     const job = await store.readJob(id)
     return job && !['queued', 'removing', 'installing'].includes(job.phase) && !runnerState(profile.dir).live.has(id) ? job : null
@@ -566,4 +567,131 @@ test('apply wires host events and mounts the API on webServer', () => {
   assert.equal(registered.length, 1)
   assert.equal(registered[0].kind, 'prefix')
   assert.equal(registered[0].path, API_PREFIX)
+})
+
+/* ── flaky networks ──────────────────────────────────────────────────────── */
+
+const SSL_RESET = "fatal: unable to access 'https://github.com/o/r/': LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443"
+
+test('isNetworkError tells a dropped connection from a missing repository', () => {
+  assert.equal(isNetworkError(SSL_RESET), true)
+  assert.equal(isNetworkError('fatal: unable to access ...: Could not resolve host: github.com'), true)
+  assert.equal(isNetworkError('Failed to connect to github.com port 443 after 75000 ms: Operation timed out'), true)
+  assert.equal(isNetworkError('git ls-remote 超时（10000 ms）'), true)
+  assert.equal(isNetworkError("remote: Repository not found.\nfatal: repository 'https://github.com/o/gone/' not found"), false)
+  assert.equal(isNetworkError('fatal: Authentication failed'), false)
+})
+
+test('gitLsRemote passes ref patterns after the URL (a real git, a local repository)', async () => {
+  const repo = await tempDir('dpm-git-')
+  const git = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...args], { cwd: repo })
+  git('init', '-q', '-b', 'main')
+  git('commit', '-q', '--allow-empty', '-m', 'one')
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo }).toString().trim()
+  const output = await gitLsRemote(repo, [], { patterns: ['HEAD'] })
+  assert.equal(output.trim(), `${head}\tHEAD`)
+  assert.equal(parseRefs(await gitLsRemote(repo, ['--symref'])).defaultBranch, 'main')
+})
+
+function flakyRemote(failures, message = SSL_RESET) {
+  const calls = []
+  return {
+    calls,
+    lsRemote: async (url, args, options) => {
+      calls.push([url, args, options.patterns])
+      if (calls.length <= failures) throw new Error(message)
+      return LS_REMOTE
+    },
+  }
+}
+
+test('preflight: a dropped TLS handshake is tried again before anything is removed', async () => {
+  const remote = flakyRemote(2)
+  const q = await queue({ r: { spec: 'github:o/r', commit: OLD } }, { lsRemote: remote.lsRemote })
+  const [job] = await q.jobs.enqueue({ type: 'update', name: 'r' })
+  const done = await q.settled(job.id)
+  assert.equal(done.phase, 'done')
+  assert.equal(done.preflight, true)
+  assert.equal(done.checkTries, 3)
+  assert.deepEqual(remote.calls.slice(0, 3).map((call) => [call[0], call[2]]), Array(3).fill(['https://github.com/o/r.git', ['HEAD']]))
+})
+
+test('preflight: an unreachable host fails the job with the plugin untouched', async () => {
+  const remote = flakyRemote(99)
+  const q = await queue({ r: { spec: 'github:o/r', commit: OLD } }, { lsRemote: remote.lsRemote })
+  const [job] = await q.jobs.enqueue({ type: 'update', name: 'r' })
+  const failed = await q.settled(job.id)
+  assert.equal(failed.phase, 'failed')
+  assert.equal(failed.failedStage, 'preflight')
+  assert.equal(failed.removed, false)
+  assert.equal(failed.failure.code, 'unreachable')
+  assert.equal(failed.failure.attempts, 3)
+  assert.match(failed.failure.diagnostic, /SSL_ERROR_SYSCALL/)
+  assert.equal(q.calls.some((call) => call[0] === 'removeBundle' || call[0] === 'installBundle'), false, 'nothing removed, nothing installed')
+  assert.equal(q.state.get('r').spec, 'github:o/r')
+})
+
+test('preflight: "repository not found" is left for DSH to report; non-git sources skip it', async () => {
+  const remote = flakyRemote(99, "remote: Repository not found.\nfatal: repository 'https://github.com/o/r/' not found")
+  const q = await queue({ r: { spec: 'github:o/r', commit: OLD }, p: { spec: 'file:/tmp/p.tgz' } }, { lsRemote: remote.lsRemote })
+  q.hooks.nameOf = (spec) => (spec.startsWith('file:') ? 'p' : 'r')
+  const [r] = await q.jobs.enqueue({ type: 'update', name: 'r' })
+  assert.equal((await q.settled(r.id)).phase, 'done')
+  const before = remote.calls.length
+  const [p] = await q.jobs.enqueue({ type: 'update', name: 'p' })
+  const done = await q.settled(p.id)
+  assert.equal(done.phase, 'done')
+  assert.equal(done.preflight, undefined)
+  assert.equal(remote.calls.length, before, 'no git for a tarball')
+})
+
+function hostDown(spec) {
+  return {
+    changed: false,
+    application: 'failed',
+    stage: 'install',
+    target: spec,
+    failedAt: 'spec-host',
+    error: { code: 'operation-error' },
+    packageResult: { exitCode: 128, output: SSL_RESET, truncated: false, logPath: '/l', kind: 'network' },
+  }
+}
+
+test('install: a failure to reach the spec host is retried automatically', async () => {
+  const q = await queue({ r: { spec: 'github:o/r', commit: OLD } })
+  let installs = 0
+  q.hooks.install = (spec) => {
+    installs += 1
+    return installs <= 2 ? hostDown(spec) : undefined
+  }
+  const [job] = await q.jobs.enqueue({ type: 'update', name: 'r' })
+  const done = await q.settled(job.id)
+  assert.equal(done.phase, 'done')
+  assert.equal(done.installTries, 3)
+  assert.equal(installs, 3)
+  const ids = q.calls.filter((call) => call[0] === 'installBundle').map((call) => call[2].requestId)
+  assert.equal(new Set(ids).size, 3, 'each try has its own request id')
+  assert.match(done.log, /retrying \(2\/3\)/)
+})
+
+test('install: other failures are not retried; a host that stays down fails after three tries', async () => {
+  const q = await queue({ a: { spec: 'github:o/a', commit: OLD }, b: { spec: 'github:o/b', commit: OLD } })
+  let installs = 0
+  q.hooks.install = (spec) => {
+    installs += 1
+    return spec.endsWith('/a')
+      ? { ...hostDown(spec), failedAt: undefined, packageResult: { exitCode: 1, output: 'ERR_PNPM_NO_MATCHING_VERSION', truncated: false, logPath: '/l', kind: 'no-matching-version' } }
+      : hostDown(spec)
+  }
+  const [a] = await q.jobs.enqueue({ type: 'update', name: 'a' })
+  const failedA = await q.settled(a.id)
+  assert.equal(failedA.installTries, 1)
+  assert.equal(installs, 1)
+  const [b] = await q.jobs.enqueue({ type: 'update', name: 'b' })
+  const failedB = await q.settled(b.id)
+  assert.equal(failedB.phase, 'failed')
+  assert.equal(failedB.removed, true)
+  assert.equal(failedB.installTries, 3)
+  assert.equal(failedB.failure.failedAt, 'spec-host')
+  assert.equal(installs, 4)
 })
