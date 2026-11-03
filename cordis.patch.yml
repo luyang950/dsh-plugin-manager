@@ -1,3 +1,3 @@
 - insert:
-    - id: dsh-plugin-updater
-      name: dsh-plugin-updater
+    - id: dsh-plugin-manager
+      name: dsh-plugin-manager

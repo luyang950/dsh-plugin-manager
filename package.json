@@ -1,15 +1,15 @@
 {
-  "name": "dsh-plugin-updater",
+  "name": "dsh-plugin-manager",
   "version": "0.1.0",
-  "description": "DeepSeek Harness plugin: an Update button on third-party plugin pages that reinstalls the plugin from its original source (GitHub, git, local path or tarball), keeping it enabled.",
+  "description": "DeepSeek Harness plugin: a Manage tab for third-party plugins — check and batch-update from GitHub / git / local / tarball sources, switch branches or roll back, export / import the plugin list, diagnostics and cleanup, plus an Update button on each plugin page.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/luyang950/dsh-plugin-updater.git"
+    "url": "git+https://github.com/luyang950/dsh-plugin-manager.git"
   },
-  "homepage": "https://github.com/luyang950/dsh-plugin-updater#readme",
+  "homepage": "https://github.com/luyang950/dsh-plugin-manager#readme",
   "bugs": {
-    "url": "https://github.com/luyang950/dsh-plugin-updater/issues"
+    "url": "https://github.com/luyang950/dsh-plugin-manager/issues"
   },
   "type": "module",
   "main": "./index.mjs",
@@ -67,6 +67,7 @@
     "dsh-plugin",
     "dsh",
     "plugin-manager",
-    "update"
+    "update",
+    "rollback"
   ]
 }
