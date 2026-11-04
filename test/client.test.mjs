@@ -350,7 +350,7 @@ test('the Manage tab lists the rows and counts what can be updated', () => {
   plugin.shared.jobs = []
   const rendered = text(plugin.ManageTab({ hub }))
   assert.match(rendered, /全部更新（1）/)
-  assert.match(rendered, /更新所选（0）/)
+  assert.match(rendered, /全选/)
   assert.match(rendered, /dsh-chat-reader/)
   assert.match(rendered, /155b39f → 62fbe58（HEAD）/)
   assert.match(rendered, /有新提交/)
@@ -493,4 +493,115 @@ test('on page load, jobs that finished long ago are closed instead of shown agai
   assert.notEqual(byId.fresh.dismissed, true, 'a self-update that just finished is still shown')
   assert.notEqual(byId.oldfail.dismissed, true, 'a failure waits for the person')
   assert.deepEqual(JSON.parse(JSON.stringify(host.calls.filter(Array.isArray))), [['/jobs/dismiss', { id: 'old' }]])
+})
+
+/* ── enable / disable, uninstall, history, bulk ──────────────────────────── */
+
+test('bulkRequests asks only for what applies to each row', () => {
+  const { plugin } = loadBundle()
+  const on = { ...READER, name: 'on', enabled: true }
+  const off = { ...TGZ, name: 'off', enabled: false }
+  const fixed = { ...READER, name: 'fixed', removable: false }
+  const rows = [on, off, SELF_ROW, fixed]
+  const json = (value) => JSON.parse(JSON.stringify(value))
+  assert.deepEqual(json(plugin.bulkRequests('enable', rows)), [{ type: 'enable', name: 'off' }])
+  assert.deepEqual(json(plugin.bulkRequests('disable', rows)), [{ type: 'disable', name: 'on' }, { type: 'disable', name: 'fixed' }], 'never this plugin')
+  assert.deepEqual(json(plugin.bulkRequests('remove', rows)), [{ type: 'remove', name: 'on' }, { type: 'remove', name: 'off' }], 'not this plugin, not a protected one')
+  assert.deepEqual(json(plugin.bulkRequests('update', rows)).map((request) => request.name), ['on', 'off', 'dsh-plugin-manager'], 'an update reinstalls, so a protected bundle is left out')
+  const gone = [{ name: 'a', pinnable: true }, { name: 'b', pinnable: false }]
+  assert.deepEqual(json(plugin.bulkRequests('reinstall', gone)), [{ type: 'reinstall', name: 'a' }, { type: 'reinstall', name: 'b' }])
+  assert.deepEqual(json(plugin.bulkRequests('reinstall-pinned', gone)), [{ type: 'reinstall', name: 'a', pin: true }])
+  assert.deepEqual(json(plugin.bulkRequests('nope', rows)), [])
+})
+
+test('rows carry an enable switch and Uninstall; this plugin gets neither uninstall nor disable', () => {
+  const { plugin } = loadBundle()
+  const row = (value) => plugin.PluginRow({ row: value, busy: false, selected: false, onSelect() {}, onUpdate() {}, onVersions() {}, onOpen() {}, onToggle() {}, onRemove() {} })
+  const flat = (node) =>
+    [node].flat(Infinity).flatMap((item) => {
+      if (!item || typeof item !== 'object') return []
+      if (typeof item.type === 'function') {
+        const children = item.children.length === 0 ? undefined : item.children.length === 1 ? item.children[0] : item.children
+        return flat(item.type({ ...(item.props || {}), ...(children === undefined ? {} : { children }) }))
+      }
+      return [item, ...flat(item.children || [])]
+    })
+  const reader = flat(row(READER))
+  const toggle = reader.find((node) => node.props && node.props.role === 'switch')
+  assert.ok(toggle, 'a switch (DSH’s Switch when present, a checkbox otherwise)')
+  assert.equal(toggle.props.checked, true)
+  assert.match(text(row(READER)), /卸载/)
+  const self = flat(row(SELF_ROW))
+  assert.equal(self.find((node) => node.props && node.props.role === 'switch').props.disabled, true, 'cannot switch itself off here')
+  assert.doesNotMatch(text(row(SELF_ROW)), /卸载/)
+})
+
+test('the bulk bar names the count each action applies to', () => {
+  const { plugin } = loadBundle()
+  assert.equal(plugin.BulkBar({ t: undefined || ((key, params) => plugin.format(plugin.ZH[key], params)), count: 0, actions: [], onClear() {} }), null)
+  const bar = text(
+    plugin.BulkBar({
+      t: (key, params) => plugin.format(plugin.ZH[key], params),
+      count: 3,
+      onClear() {},
+      actions: [
+        { key: 'update', label: '更新', count: 3, run() {} },
+        { key: 'enable', label: '启用', count: 1, run() {} },
+      ],
+    }),
+  )
+  assert.match(bar, /已选 3 个/)
+  assert.match(bar, /更新/)
+  assert.match(bar, /启用（1）/)
+  assert.match(bar, /取消选择/)
+})
+
+test('the Manage tab lists uninstalled plugins with reinstall and forget', () => {
+  const { plugin } = loadBundle()
+  const hub = { refreshOverview() {}, refreshJobs() {}, enqueue() {}, forget() {} }
+  plugin.shared.jobs = []
+  plugin.shared.overview = {
+    profile: 'web',
+    plugins: [READER],
+    removed: [
+      { name: 'gone', spec: 'github:o/gone', kind: 'github', enabled: true, version: '1.2.0', commit: OLD, removedAt: 1, pinnable: true },
+      { name: 'tgz', spec: 'file:/tmp/t.tgz', kind: 'tarball', enabled: false, removedAt: 2, pinnable: false },
+    ],
+  }
+  const rendered = text(plugin.ManageTab({ hub }))
+  assert.match(rendered, /已卸载的插件（2）/)
+  assert.match(rendered, /重新安装/)
+  assert.match(rendered, /装回 155b39f/)
+  assert.match(rendered, /删除记录/)
+  assert.match(rendered, /原来停用/)
+  plugin.shared.overview = { profile: 'web', plugins: [READER], removed: [] }
+  assert.doesNotMatch(text(plugin.ManageTab({ hub })), /已卸载的插件/)
+})
+
+test('enable / disable jobs show one step; unchanged and removed outcomes are named', () => {
+  const { plugin } = loadBundle()
+  const hub = { retry() {}, dismiss() {} }
+  assert.equal(plugin.stepState({ type: 'disable', phase: 'switching' }, 'toggle'), 'running')
+  assert.equal(plugin.stepState({ type: 'disable', phase: 'switching' }, 'remove'), null)
+  assert.equal(plugin.stepState({ type: 'update', phase: 'installing' }, 'toggle'), null)
+  const off = text(plugin.JobPanel({ job: { id: 'a', type: 'disable', name: 'r', phase: 'done', enabled: false }, hub }))
+  assert.match(off, /「r」已停用/)
+  assert.match(off, /停用插件/)
+  assert.doesNotMatch(off, /保持/)
+  assert.match(text(plugin.JobPanel({ job: { id: 'b', type: 'enable', name: 'r', phase: 'done', application: 'unchanged' }, hub })), /本来就是这个状态/)
+  assert.match(text(plugin.JobPanel({ job: { id: 'c', type: 'remove', name: 'r', phase: 'done', removed: true }, hub })), /可以在「已卸载的插件」里重新安装/)
+})
+
+test('hub.forget hides the records at once and asks the host', async () => {
+  const { plugin } = loadBundle()
+  const host = fakeHost()
+  host.state.overview = { profile: 'web', plugins: [], removed: [{ name: 'a' }, { name: 'b' }] }
+  const original = host.deps.request
+  host.deps.request = async (path, body) => (path === '/history/forget' ? (host.calls.push([path, body]), { ok: true, forgotten: body.names }) : original(path, body))
+  const hub = plugin.createHub(host.deps)
+  await hub.refreshOverview()
+  host.state.overview = { profile: 'web', plugins: [], removed: [{ name: 'b' }] }
+  await hub.forget(['a'])
+  assert.deepEqual(JSON.parse(JSON.stringify(plugin.shared.overview.removed)), [{ name: 'b' }])
+  assert.deepEqual(JSON.parse(JSON.stringify(host.calls.filter(Array.isArray))), [['/history/forget', { names: ['a'] }]])
 })

@@ -116,6 +116,17 @@ export async function fakeProfile(plugins = {}, { official = [] } = {}) {
       await write()
       return { changed: true, application: 'applied', stage: 'remove', target: name }
     },
+    async setBundleEnabled(name, enabled) {
+      calls.push(['setBundleEnabled', name, enabled])
+      if (hooks.setEnabled) {
+        const result = await hooks.setEnabled(name, enabled)
+        if (result) return result
+      }
+      if (!state.has(name)) return { changed: false, application: 'failed', stage: 'enable', target: name, error: { code: 'unknown-plugin' } }
+      state.get(name).enabled = enabled
+      await write()
+      return { changed: true, application: 'applied', stage: 'enable', target: name, enabled }
+    },
     async installBundle(spec, options = {}) {
       calls.push(['installBundle', spec, options])
       if (hooks.install) {

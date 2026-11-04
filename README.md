@@ -6,7 +6,7 @@
 
 ## 中文
 
-DeepSeek Harness（DSH）第三方插件的管理工具。在 DSH 插件页加一个**管理**标签页，集中查看和维护你自己安装的插件：从哪里装的、锁定在哪个提交、远端有没有更新；可以批量更新、切换分支或 tag、回滚、导入导出插件清单、排查异常。每个插件的详情页也会多一个**更新**按钮。
+DeepSeek Harness（DSH）第三方插件的管理工具。在 DSH 插件页加一个**管理**标签页，集中查看和维护你自己安装的插件：从哪里装的、锁定在哪个提交、远端有没有更新；可以更新、启用停用、卸载、重新安装已卸载的插件、切换分支或 tag、回滚、导入导出插件清单、排查异常，大部分操作都支持批量。每个插件的详情页也会多一个**更新**按钮。
 
 所有改动都交给 DSH 自己的插件管理服务完成，用的就是插件页「卸载」和「安装」背后的 `removeBundle` / `installBundle`。本插件只负责安排先后顺序，记录每一步，并在出错时告诉你插件现在处于什么状态。
 
@@ -18,7 +18,16 @@ DeepSeek Harness（DSH）第三方插件的管理工具。在 DSH 插件页加�
 
 - **总览**：列出当前 profile 里你安装的每个插件（DSH 自带的和官方插件不列），包括版本、来源类型（GitHub / git / 本地 / 压缩包 / npm）、安装 spec、锁定的提交、启用状态。
 - **检查更新**：对 GitHub 和其他 git 来源执行 `git ls-remote`，比较远端分支（没写就是默认分支）最新的提交和 `pnpm-lock.yaml` 里锁定的提交。落后的插件标「有新提交」并显示 `155b39f → 62fbe58`；固定在某个提交的显示「固定在 …」。结果缓存 10 分钟，按钮会强制重查。
-- **全部更新 / 更新所选**：按顺序逐个卸载，再从原来源重新安装，每个插件保持原来的启用状态。dsh-plugin-manager 自己总是排在最后。
+- **全部更新**：按顺序逐个卸载，再从原来源重新安装，每个插件保持原来的启用状态。dsh-plugin-manager 自己总是排在最后。
+- **启用 / 停用**：每行一个开关，调用 DSH 自己的 `setBundleEnabled`，和「已安装」里的开关效果相同，不会重新安装。
+- **卸载**：确认后卸载。卸载的插件会进入下方「已卸载的插件」。
+- **批量操作**：勾选若干插件（或「全选」），选择栏里可以批量**更新 / 启用 / 停用 / 卸载**，按钮上会写明实际作用于几个（例如已经启用的不会再启用）。任务按顺序一个个执行。
+- **已卸载的插件**：这个 profile 装过、现在已经不在的插件都会记下来，包括在「已安装」里卸载的。每个显示原来的来源、版本、提交、卸载时间和当时的启用状态，可以：
+  - **重新安装**：按原来的来源装回，恢复原来的启用状态；
+  - **装回 \<提交\>**（git 来源）：按卸载前锁定的提交装回，并固定在那个提交；
+  - **删除记录**：从列表里去掉。
+  - 同样支持勾选后批量重新安装、批量装回原提交、批量删除记录。
+- dsh-plugin-manager 自己不能在这里停用或卸载（那样会把这个页面一起关掉），请在「已安装」里操作。
 - **版本…**：
   - git 来源可以选「跟随默认分支」、任一分支、任一 tag；
   - 也可以「回滚到更新前」：每次更新或切换前，插件会记下当时的提交、版本和 spec；
@@ -138,7 +147,16 @@ Plugins → **Manage**.
   - A plugin that is behind shows *New commits* and `155b39f → 62fbe58`.
   - A pinned one shows *Pinned to …*.
   - Results are cached for 10 minutes; the button always checks again.
-- **Update all / Update selected**: uninstall and reinstall from the original source, one plugin at a time, each keeping its enabled state. dsh-plugin-manager itself always goes last.
+- **Update all**: uninstall and reinstall from the original source, one plugin at a time, each keeping its enabled state. dsh-plugin-manager itself always goes last.
+- **Enable / disable**: a switch on each row calls DSH's own `setBundleEnabled`, the same as the switch on the Installed tab; nothing is reinstalled.
+- **Uninstall**: after a confirmation. Uninstalled plugins move to *Uninstalled plugins* below.
+- **Bulk actions**: check some plugins (or *Select all*) and the selection bar offers **Update / Enable / Disable / Uninstall**, each saying how many it actually applies to (an enabled plugin is not enabled again). Jobs run one at a time.
+- **Uninstalled plugins**: every plugin this profile had and no longer has is remembered, including those uninstalled from the Installed tab, with its source, version, commit, when it went and whether it was enabled. You can:
+  - **Reinstall** it from its source, with the enabled state it had;
+  - **Reinstall \<commit\>** (git sources): install the commit it had and pin it there;
+  - **Delete record** to drop it from the list.
+  - Each works in bulk too.
+- dsh-plugin-manager cannot disable or uninstall itself here (that would take this page away); use the Installed tab.
 - **Versions…**:
   - For git sources: follow the default branch, any branch, or any tag.
   - *Roll back to before an update*: every update or switch first records the plugin's commit, version and spec.

@@ -11,7 +11,7 @@ import test from 'node:test'
 import { API_PREFIX, apply, inject, name } from '../index.mjs'
 import { createApi } from '../lib/api.mjs'
 import { gitLsRemote, isNetworkError, listRemoteRefs, lockedCommit, lockedEntry, parseRefs, pickRemoteCommit, remoteStatus, resolveRef } from '../lib/git.mjs'
-import { cleanLogs, exportManifest, importPlan, listLogs, pluginRows, problems, readLog } from '../lib/inventory.mjs'
+import { cleanLogs, exportManifest, importPlan, listLogs, mergeKnown, pluginRows, problems, readLog } from '../lib/inventory.mjs'
 import { createJobs, failureOf, runnerState } from '../lib/jobs.mjs'
 import { classifySource, gitRemote, specWithRef, validRef } from '../lib/sources.mjs'
 import { createStore } from '../lib/store.mjs'
@@ -694,4 +694,91 @@ test('install: other failures are not retried; a host that stays down fails afte
   assert.equal(failedB.installTries, 3)
   assert.equal(failedB.failure.failedAt, 'spec-host')
   assert.equal(installs, 4)
+})
+
+/* ── enable / disable, uninstall history, reinstall ──────────────────────── */
+
+test('enable and disable go through setBundleEnabled; an unchanged state is a no-op', async () => {
+  const q = await queue({ a: { spec: 'github:o/a', commit: OLD, enabled: true } })
+  const [off] = await q.jobs.enqueue({ type: 'disable', name: 'a' })
+  const disabled = await q.settled(off.id)
+  assert.equal(disabled.phase, 'done')
+  assert.equal(disabled.enabled, false)
+  assert.equal(q.state.get('a').enabled, false)
+  const [again] = await q.jobs.enqueue({ type: 'disable', name: 'a' })
+  assert.equal((await q.settled(again.id)).application, 'unchanged')
+  assert.equal(q.calls.filter((call) => call[0] === 'setBundleEnabled').length, 1)
+  q.hooks.setEnabled = (name) => ({ changed: false, application: 'failed', stage: 'enable', target: name, error: { code: 'operation-error', diagnostic: 'import failed: SyntaxError' } })
+  const [on] = await q.jobs.enqueue({ type: 'enable', name: 'a' })
+  const failed = await q.settled(on.id)
+  assert.equal(failed.phase, 'failed')
+  assert.equal(failed.failedStage, 'switch')
+  assert.match(failed.failure.diagnostic, /SyntaxError/)
+  assert.equal(q.calls.some((call) => call[0] === 'removeBundle' || call[0] === 'installBundle'), false, 'no reinstall for a switch')
+  const [ghost] = await q.jobs.enqueue({ type: 'enable', name: 'ghost' })
+  assert.equal((await q.settled(ghost.id)).failure.code, 'unknown-plugin')
+})
+
+test('this plugin cannot be disabled or removed from its own page', async () => {
+  const q = await queue({ 'dsh-plugin-manager': { spec: 'link:/dev/dsh-plugin-manager' } })
+  await assert.rejects(q.jobs.enqueue({ type: 'disable', name: 'dsh-plugin-manager' }), /不能停用或卸载自己/)
+  await assert.rejects(q.jobs.enqueue([{ type: 'remove', name: 'dsh-plugin-manager' }]), /不能停用或卸载自己/)
+})
+
+test('mergeKnown remembers every plugin seen and notices the ones that left', () => {
+  const rows = [
+    { name: 'a', installed: true, source: 'github:o/a', kind: 'github', enabled: true, version: '1.0.0', locked: OLD },
+    { name: 'b', installed: true, source: 'file:/tmp/b.tgz', kind: 'tarball', enabled: false, version: '0.1.0', locked: null },
+  ]
+  const first = mergeKnown({}, rows, 100)
+  assert.equal(first.changed, true)
+  assert.deepEqual(first.removed, [])
+  assert.equal(mergeKnown(first.known, rows, 200).changed, false, 'nothing new, nothing written')
+  const second = mergeKnown(first.known, [rows[1]], 300)
+  assert.equal(second.changed, true)
+  assert.deepEqual(second.removed.map((row) => [row.name, row.removedAt, row.commit, row.pinnable, row.enabled]), [['a', 300, OLD, true, true]])
+  const third = mergeKnown(second.known, [rows[1]], 400)
+  assert.equal(third.removed[0].removedAt, 300, 'first missed time is kept')
+  const back = mergeKnown(third.known, rows, 500)
+  assert.deepEqual(back.removed, [], 'a reinstalled plugin leaves the list')
+  assert.equal(back.known.a.removedAt, undefined)
+  const pinned = mergeKnown({ p: { spec: `github:o/p#${OLD}`, commit: OLD, removedAt: 1 } }, [], 2)
+  assert.equal(pinned.removed[0].pinnable, false, 'already pinned: nothing to pin')
+})
+
+test('uninstall records the plugin; reinstall brings it back with its enabled state, optionally pinned', async () => {
+  const q = await queue({ a: { spec: 'github:o/a', commit: OLD, version: '1.0.0', enabled: false }, b: { spec: 'github:o/b', commit: OLD } })
+  q.hooks.head = NEW
+  const [remove] = await q.jobs.enqueue([{ type: 'remove', name: 'a' }, { type: 'remove', name: 'b' }])
+  for (const job of (await q.jobs.list()).filter((item) => item.type === 'remove')) await q.settled(job.id)
+  assert.equal(remove.batch !== undefined, true)
+  const known = await q.store.readKnown()
+  assert.deepEqual([known.a.spec, known.a.commit, known.a.enabled, known.a.version, typeof known.a.removedAt], ['github:o/a', OLD, false, '1.0.0', 'number'])
+
+  const [plain] = await q.jobs.enqueue({ type: 'reinstall', name: 'a' })
+  assert.equal(plain.type, 'install')
+  assert.equal(plain.spec, 'github:o/a')
+  assert.equal(plain.enabled, false)
+  await q.settled(plain.id)
+  assert.equal(q.state.get('a').commit, NEW)
+  assert.equal(q.state.get('a').enabled, false, 'it comes back as it was')
+
+  const [pinned] = await q.jobs.enqueue({ type: 'reinstall', name: 'b', pin: true })
+  assert.equal(pinned.spec, `github:o/b#${OLD}`)
+  await q.settled(pinned.id)
+  assert.equal(q.state.get('b').commit, OLD)
+
+  await assert.rejects(q.jobs.enqueue({ type: 'reinstall', name: 'never-seen' }), /卸载记录/)
+})
+
+test('GET overview lists removed plugins; POST history/forget drops them', async () => {
+  const a = await api({ keep: { spec: 'github:o/keep', commit: OLD }, gone: { spec: 'github:o/gone', commit: OLD } })
+  assert.deepEqual((await call(a.handler, 'GET', `${API_PREFIX}/overview`)).json.removed, [])
+  await a.pluginManager.removeBundle('gone') // removed on DSH's own page, not through a job
+  const overview = (await call(a.handler, 'GET', `${API_PREFIX}/overview`)).json
+  assert.deepEqual(overview.removed.map((row) => [row.name, row.spec, row.pinnable]), [['gone', 'github:o/gone', true]])
+  const forgot = await call(a.handler, 'POST', `${API_PREFIX}/history/forget`, { names: ['gone', 'keep'] })
+  assert.deepEqual(forgot.json.forgotten, ['gone'], 'an installed plugin is not forgotten')
+  assert.deepEqual((await call(a.handler, 'GET', `${API_PREFIX}/overview`)).json.removed, [])
+  assert.equal((await call(a.handler, 'POST', `${API_PREFIX}/history/forget`, { names: [] })).status, 400)
 })
